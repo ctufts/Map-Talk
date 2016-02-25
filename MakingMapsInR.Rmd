@@ -1,0 +1,155 @@
+---
+title: "Creating Maps in R"
+output: html_document
+---
+
+This demo will use crime data from opendata philly recorded between 2012 and 2014. The first step is to import the libraries I will be using to process the data. I will import the first 50,000 rows of the Philadelphia Crime Data. Note: If you want to import the complete file you would just delete the <i>n_max</i> statement.  
+
+```{r, message=F, warning=F}
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(RColorBrewer)
+library(leaflet)
+library(stringr)
+library(rgdal)
+library(readr)
+source('fte_theme.R')
+source('multiplot.R')
+
+# ds <- read_csv('https://data.phila.gov/api/views/7ret-xhtc/rows.csv?accessType=DOWNLOAD', n_max = 50000)
+# local copy import
+ds  <- read_csv('data/PPD_Crime_Incidents_2012-2014.csv', n_max = 50000)
+```
+
+The <i>read_csv</i> function stores the data in a <i>dataframe</i>.  A dataframe is basically a table which can store different types of data. The first 5 rows of the the dataframe <i>ds</i> are shown below using the <i>head</i> function. 
+```{r}
+head(ds)
+```
+
+So the first issue with this dataset is the way the coordinates are presented. They are provided as a string surrounded by parentheses. 
+```{r}
+head(ds$Coordinates)
+```
+
+To deal with this I will have to use some regular expressions commands.  Regular expression commands allow you to parse text data in a variety of ways. If you don't have much experience with regular expression commands check out [Sam Hughes post on the subject](http://qntm.org/files/re/re.html) and [my gist](https://gist.github.com/ctufts/14e75172303dec0218ba) with some examples you can run in R. 
+
+```{r}
+# delete opening parenthesis - sub ( with nothing
+ds$Coordinates<- gsub(")", "", ds$Coordinates)
+# delete closing parenthesis - sub ) with nothing
+ds$Coordinates<- gsub("\\(", "", ds$Coordinates)
+# split each coordinate entry at the comman
+coord.list <- (str_split(ds$Coordinates, ","))
+# first entry to the x coordinate
+y <- as.numeric(unlist(lapply(coord.list, function(x)x[1])))
+# second entry to the y coordinate
+x <- as.numeric(unlist(lapply(coord.list, function(x)x[2])))
+# create new data frame with the new coordinates
+# the crime type, district, and the date/time of the crime
+coordinates <- data.frame(POINT_Y = y,
+                          POINT_X = x,
+                          General.Crime.Category = ds$`General Crime Category`,
+                          District = ds$District,
+                          Dispatch.Date = ds$`Dispatch Date/Time`
+)
+```
+I am removing any rows The 22nd and 23rd districts were combined years back, so I am going to combine the two. 
+
+```{r}
+# remove any rows with missing coordinates
+coordinates <- na.omit(coordinates)
+# combine 22nd and 23rd districts
+coordinates$District[coordinates$District==23] <- 22
+```
+
+The first map will display the number of crime incidents in each police district. To start this procedure I will have to calculate the number of crimes in each district.  
+
+```{r}
+# read in shape data for the police districts
+districts <- readOGR(dsn = "data/shp",
+                     layer = "Police_Districts", verbose = FALSE)
+
+# count the number of crime committed by each district
+# group by crime type
+district.log <- coordinates %>% group_by(General.Crime.Category, District) %>%
+  summarise(
+    events = n()
+  )
+```
+
+I created a dataframe named <i>district.log</i> which contains the number of crime incedents in each district grouped by crime type.  I will only focus on <i>Arson</i> events for the visualization. 
+```{r}
+##### select a type of crime #####
+# select the arson crimes in the list
+crime.type.selected <- 'Arson'
+print(crime.type.selected)
+# count the number of crimes committed in each district
+district.counts <- filter(district.log, General.Crime.Category == crime.type.selected) %>% 
+  arrange(District)
+```
+
+Ok, so now I'm ready to plot a map. I create a color palette for the shading of the districts and then create the map. The color of each district is based on the number of arsons in the district.
+
+```{r}
+
+# create a color palette for the map
+pal <- colorNumeric(
+  palette = "Greys",
+  domain = district.counts$events
+)
+
+# create map
+# add a template set of tiles
+# set the initial view positions and zoom level
+# add polygons
+crime.map <- leaflet() %>%
+  addProviderTiles('CartoDB.Positron') %>%
+  setView(lng=-75.16048, lat=39.99000, zoom =11) %>%
+  addPolygons(data = districts,
+              stroke = T, smoothFactor = 0.2, fillOpacity = 0.5,
+              color = "#000000", weight = 2, 
+              fillColor = ~pal(district.counts$events)
+              # color = ~pal(states@data$DISTRICT_)
+  )
+crime.map
+```
+
+To get a better understanding of the number of arsons in each district; I add a legend.  
+
+```{r}
+crime.map <- crime.map %>% 
+  addLegend("bottomright", pal = pal, values = district.counts$events,
+            title = "Incidents 2012-2014",
+            opacity = 1
+  )
+crime.map
+```
+
+Now I will add individual markers where each arson occurred. 
+
+```{r}
+point.coord <- filter(coordinates, General.Crime.Category == crime.type.selected)
+addCircles(crime.map, lat = point.coord$POINT_Y, lng = point.coord$POINT_X)    
+
+```
+
+I want to change the color and radius of the markers. 
+
+```{r}
+addCircles(crime.map, lat = point.coord$POINT_Y, lng = point.coord$POINT_X,
+             fillOpacity = 0.8 , opacity = 0.8, radius = 160, fillColor = "#F0F340",
+             weight = 2,
+             color = "#5E610B")    
+
+```
+
+The final touch is to add pop-up labels to the markers. 
+
+```{r}
+addCircles(crime.map, lat = point.coord$POINT_Y, lng = point.coord$POINT_X,
+             fillOpacity = 0.8 , opacity = 0.8, radius = 160, fillColor = "#F0F340",
+             color = "#5E610B", weight = 2,
+             popup = paste("District:",point.coord$District, "<br/> Time:", point.coord$Dispatch.Date))    
+
+```
